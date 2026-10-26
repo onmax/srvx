@@ -297,6 +297,38 @@ describe("node response stream error handling", () => {
     await server.close(true);
   });
 
+  // Regression: an upstream response with an empty body (e.g. a proxied
+  // `IncomingMessage`) has already ended by the time `pipeBody` subscribes.
+  // Node then emits 'end' but never 'readable', so the response never started.
+  test("FastResponse: already-ended empty node stream sends an empty body", async () => {
+    const upstream = createServer((_req, res) => res.end());
+    await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
+    const { port } = upstream.address() as AddressInfo;
+
+    const server = serve({
+      port: 0,
+      fetch() {
+        return new Promise<Response>((resolve, reject) => {
+          request({ host: "127.0.0.1", port }, (res) => {
+            resolve(new FastResponse(res as unknown as BodyInit, { status: 201 }));
+          })
+            .on("error", reject)
+            .end();
+        });
+      },
+    });
+    await server.ready();
+
+    const result = await Promise.race([
+      fetch(server.url!).then(async (res) => `${res.status} ${JSON.stringify(await res.text())}`),
+      new Promise<string>((r) => setTimeout(() => r("hung"), 3000)),
+    ]);
+
+    expect(result).toBe(`201 ""`);
+    await server.close(true);
+    upstream.close();
+  });
+
   test("FastResponse: pre-destroyed node stream returns 500", async () => {
     const server = serve({
       port: 0,

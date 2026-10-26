@@ -247,7 +247,7 @@ function pipeBody(
   }
 
   // Real Node.js streams support pipeline() for proper error/abort propagation.
-  // Wait for the first event (readable or error) before writing headers so that
+  // Wait for the first event (readable, end or error) before writing headers so that
   // if the stream errors before producing any data we can respond with 500
   // instead of committing to the original status code.
 
@@ -258,10 +258,11 @@ function pipeBody(
   }
 
   return new Promise<void>((resolve) => {
-    // All three outcomes are terminal: whichever fires first detaches the others.
+    // All four outcomes are terminal: whichever fires first detaches the others.
     function cleanup() {
       stream.off("error", onEarlyError);
       stream.off("readable", onReadable);
+      stream.off("end", onEmptyEnd);
       nodeRes.off("close", onResClose);
     }
     function onEarlyError() {
@@ -281,6 +282,13 @@ function pipeBody(
         .catch(() => {})
         .then(() => resolve());
     }
+    // A stream that hit EOF with no data before we subscribed (e.g. an empty
+    // proxied `IncomingMessage`) emits only 'end', never 'readable'.
+    function onEmptyEnd() {
+      cleanup();
+      writeHead(nodeRes, status, statusText, headers);
+      (endNodeResponse(nodeRes) as Promise<void>).then(resolve);
+    }
     // The client can vanish before the stream produces its first byte. Nothing
     // else observes that here (`pipeline()` has not started yet), so the source
     // — and whatever fd/socket backs it — would stay open forever.
@@ -291,6 +299,7 @@ function pipeBody(
     }
     stream.once("error", onEarlyError);
     stream.once("readable", onReadable);
+    stream.once("end", onEmptyEnd);
     nodeRes.once("close", onResClose);
   });
 }
